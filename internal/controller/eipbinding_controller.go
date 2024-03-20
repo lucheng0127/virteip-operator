@@ -19,7 +19,11 @@ package controller
 import (
 	"context"
 	"fmt"
+	"math/rand"
+	"strings"
 
+	"golang.org/x/sync/errgroup"
+	kbatch "k8s.io/api/batch/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/fields"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -33,8 +37,17 @@ import (
 
 	virteipv1 "github.com/lucheng0127/virteip-operator/api/v1"
 	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	vmv1 "kubevirt.io/api/core/v1"
 )
+
+const (
+	JobImg       = "quay.io/shawnlu0127/eipctl:20240319"
+	ActionBind   = "bind"
+	ActionUnbind = "unbind"
+)
+
+var eipctlCmd = "/eipctl --target %s:6127 --eip-ip %s --vmi-ip %s --action %s"
 
 // EipBindingReconciler reconciles a EipBinding object
 type EipBindingReconciler struct {
@@ -83,6 +96,69 @@ func (r *EipBindingReconciler) getVmiInfo(eb virteipv1.EipBinding) (string, stri
 	return hyperAddr, vmi.Status.Interfaces[0].IP, nil
 }
 
+func randStrings(n int) string {
+	letterRunes := []rune("abcdefghijklmnopqrstuvwxyz")
+	b := make([]rune, n)
+	for i := range b {
+		b[i] = letterRunes[rand.Intn(len(letterRunes))]
+	}
+	return string(b)
+}
+
+// Construct job for sync eip rules
+func (r *EipBindingReconciler) constructEipBindingJob(eb virteipv1.EipBinding, cmd string) (*kbatch.Job, error) {
+	name := fmt.Sprintf("eip-%s-binding-%s", eb.Spec.EipAddr, randStrings(8))
+	name = strings.Replace(name, ".", "-", -1)
+	backoflimit := int32(0)
+
+	job := &kbatch.Job{
+		ObjectMeta: metav1.ObjectMeta{
+			Labels:      make(map[string]string),
+			Annotations: make(map[string]string),
+			Name:        name,
+			Namespace:   eb.Namespace,
+		},
+		Spec: kbatch.JobSpec{
+			BackoffLimit: &backoflimit,
+			Template: corev1.PodTemplateSpec{
+				Spec: corev1.PodSpec{
+					RestartPolicy: corev1.RestartPolicyNever,
+					Containers: []corev1.Container{
+						{
+							Name:    name,
+							Image:   JobImg,
+							Command: strings.Split(cmd, " "),
+						},
+					},
+				},
+			},
+		},
+	}
+
+	// TODO(shawnlu): Set controller reference
+	//if err := ctrl.SetControllerReference(eb, job, r.Scheme); err != nil {
+	//	return nil, err
+	//}
+
+	return job, nil
+}
+
+func (r *EipBindingReconciler) syncEipBinding(ctx context.Context, eb virteipv1.EipBinding, action, hyper, eip, vmip string) error {
+	var cmd string
+	if strings.ToLower(action) == ActionBind {
+		cmd = fmt.Sprintf(eipctlCmd, hyper, eip, vmip, ActionBind)
+	} else {
+		cmd = fmt.Sprintf(eipctlCmd, hyper, eip, vmip, ActionUnbind)
+	}
+
+	job, err := r.constructEipBindingJob(eb, cmd)
+	if err != nil {
+		return err
+	}
+
+	return r.Create(ctx, job)
+}
+
 //+kubebuilder:rbac:groups=virteip.github.com,resources=eipbindings,verbs=get;list;watch;create;update;patch;delete
 //+kubebuilder:rbac:groups=virteip.github.com,resources=eipbindings/status,verbs=get;update;patch
 //+kubebuilder:rbac:groups=virteip.github.com,resources=eipbindings/finalizers,verbs=update
@@ -93,7 +169,6 @@ func (r *EipBindingReconciler) getVmiInfo(eb virteipv1.EipBinding) (string, stri
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
 // move the current state of the cluster closer to the desired state.
-// TODO(user): Modify the Reconcile function to compare the state specified by
 // the EipBinding object against the actual cluster state, and then
 // perform operations to make the cluster state reflect the state specified by
 // the user.
@@ -137,9 +212,13 @@ func (r *EipBindingReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	} else {
 		// EipBinding is being deleted
 		if controllerutil.ContainsFinalizer(&eb, finalizerName) {
-			// TODO(shawnlu): Do clean up
-
-			log.Info(fmt.Sprintf("Clean up staled eip rules eip_%s<->vmip_%s on %s", eb.Spec.EipAddr, eb.Spec.LastIP, eb.Spec.LastHyper))
+			// Do clean up
+			log.Info(fmt.Sprintf("Clean up staled eip rules [1] eip_%s<->vmip_%s on %s", eb.Spec.EipAddr, eb.Spec.LastIP, eb.Spec.LastHyper))
+			err := r.syncEipBinding(ctx, eb, ActionUnbind, eb.Spec.LastHyper, eb.Spec.EipAddr, eb.Spec.LastIP)
+			if err != nil {
+				log.Error(err, "clean up eip rules [1]")
+				return ctrl.Result{}, err
+			}
 		}
 
 		controllerutil.RemoveFinalizer(&eb, finalizerName)
@@ -176,18 +255,42 @@ func (r *EipBindingReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	eb.Spec.LastIP = currentIP
 	needUpdate = true
 
+	eg := new(errgroup.Group)
 	if staleHyper != "" && staleIP != "" {
-		// TODO(shawnlu): Clean up staled eip rules
-		log.Info(fmt.Sprintf("Clean up staled eip rules eip_%s<->vmip_%s on %s", eb.Spec.EipAddr, staleIP, staleHyper))
+		// up staled eip rules
+		log.Info(fmt.Sprintf("Clean up staled eip rules [2] eip_%s<->vmip_%s on %s", eb.Spec.EipAddr, staleIP, staleHyper))
+		eg.Go(func() error {
+			err := r.syncEipBinding(ctx, eb, ActionUnbind, staleHyper, eb.Spec.EipAddr, staleIP)
+
+			if err != nil {
+				log.Error(err, "clean up eip rules [2]")
+			}
+
+			return err
+		})
 	}
 
-	// TODO(shawnlu): apply eip rules to current hyper and current ipv4 address
 	if currentHyper == "" {
 		return ctrl.Result{}, nil
 	}
-	log.Info(fmt.Sprintf("Apply hyper eip rules eip_%s<->vmip_%s on %s", eb.Spec.EipAddr, currentIP, currentHyper))
 
-	// Clean jobs according to job history limit
+	// Apply eip rules to current hyper and current ipv4 address
+	log.Info(fmt.Sprintf("Apply hyper eip rules [1] eip_%s<->vmip_%s on %s", eb.Spec.EipAddr, currentIP, currentHyper))
+	eg.Go(func() error {
+		err := r.syncEipBinding(ctx, eb, ActionBind, currentHyper, eb.Spec.EipAddr, currentIP)
+
+		if err != nil {
+			log.Error(err, "apply eip rules [1]")
+		}
+
+		return err
+	})
+
+	if err := eg.Wait(); err != nil {
+		return ctrl.Result{}, err
+	}
+
+	// TODO(shawnlu): Clean jobs according to job history limit
 
 	return ctrl.Result{}, nil
 }
