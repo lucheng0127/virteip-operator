@@ -1,0 +1,48 @@
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: manager-role
+rules:
+- apiGroups:
+  - ""
+  resources:
+  - nodes
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - kubevirt.io
+  resources:
+  - virtualmachineinstances
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - virteip.github.com
+  resources:
+  - eipbindings
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - virteip.github.com
+  resources:
+  - eipbindings/finalizers
+  verbs:
+  - update
+- apiGroups:
+  - virteip.github.com
+  resources:
+  - eipbindings/status
+  verbs:
+  - get
+  - patch
+  - update

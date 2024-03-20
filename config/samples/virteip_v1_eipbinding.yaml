@@ -1,0 +1,12 @@
+apiVersion: virteip.github.com/v1
+kind: EipBinding
+metadata:
+  labels:
+    app.kubernetes.io/name: eipbinding
+    app.kubernetes.io/instance: eipbinding-sample
+    app.kubernetes.io/part-of: virteip-operator
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/created-by: virteip-operator
+  name: eipbinding-sample
+spec:
+  # TODO(user): Add fields here
