@@ -18,6 +18,7 @@ package controller
 
 import (
 	"context"
+	"fmt"
 
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/fields"
@@ -25,6 +26,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
@@ -99,21 +101,93 @@ func (r *EipBindingReconciler) getVmiInfo(eb virteipv1.EipBinding) (string, stri
 // For more details, check Reconcile and its Result here:
 // - https://pkg.go.dev/sigs.k8s.io/controller-runtime@v0.17.0/pkg/reconcile
 func (r *EipBindingReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
-	_ = log.FromContext(ctx)
+	log := log.FromContext(ctx)
 
 	// Get current eipbinding
+	var eb virteipv1.EipBinding
+
+	if err := r.Get(ctx, req.NamespacedName, &eb); err != nil {
+		if errors.IsNotFound(err) {
+			return ctrl.Result{}, nil
+		}
+
+		log.Error(err, "unable to fetch EipBinding")
+		return ctrl.Result{}, err
+	}
+
+	// Update last hyper and vmi ip info before exist if vmi hyper or ip info changed
+	needUpdate := false
+	defer func() {
+		if needUpdate {
+			if err := r.Update(ctx, &eb); err != nil {
+				log.Error(err, "update Eipbinding")
+			}
+		}
+	}()
+
+	// Handle delete EipBinding CRD
+	finalizerName := "virteip.github.com/finlizer"
+	if eb.ObjectMeta.DeletionTimestamp.IsZero() {
+		// EipBinding is not been deleted, register finalizer
+		if !controllerutil.ContainsFinalizer(&eb, finalizerName) {
+			controllerutil.AddFinalizer(&eb, finalizerName)
+			needUpdate = true
+			return ctrl.Result{}, nil
+		}
+	} else {
+		// EipBinding is being deleted
+		if controllerutil.ContainsFinalizer(&eb, finalizerName) {
+			// TODO(shawnlu): Do clean up
+
+			log.Info(fmt.Sprintf("Clean up staled eip rules eip_%s<->vmip_%s on %s", eb.Spec.EipAddr, eb.Spec.LastIP, eb.Spec.LastHyper))
+		}
+
+		controllerutil.RemoveFinalizer(&eb, finalizerName)
+		needUpdate = true
+		log.Info("Delete EipBinding finished")
+		return ctrl.Result{}, nil
+	}
 
 	// Get current hyper and vmi ip info
+	currentHyper, currentIP, err := r.getVmiInfo(eb)
+	if err != nil {
+		if !errors.IsNotFound(err) {
+			log.Error(err, "unable to get vmi")
+			return ctrl.Result{}, err
+		}
+
+		//log.Info("VMI offline")
+	}
 
 	// Compare last and current hyper and vmi info
 	// if vmi ip change, sync eipbing rules via job
 	// if hyper change, vmi ip not change skip
+	if eb.Spec.LastIP == currentIP {
+		// For vmi, if hyper change, vmi ip must change, so if vmi ip not change
+		// it means vmi is migrating and the vmi info not sync finished
+		//log.Info("Vmi info not update finished, skip")
+		return ctrl.Result{}, nil
+	}
 
 	// Generate job to sync eipbinding rules
+	staleHyper := eb.Spec.LastHyper
+	staleIP := eb.Spec.LastIP
+	eb.Spec.LastHyper = currentHyper
+	eb.Spec.LastIP = currentIP
+	needUpdate = true
+
+	if staleHyper != "" && staleIP != "" {
+		// TODO(shawnlu): Clean up staled eip rules
+		log.Info(fmt.Sprintf("Clean up staled eip rules eip_%s<->vmip_%s on %s", eb.Spec.EipAddr, staleIP, staleHyper))
+	}
+
+	// TODO(shawnlu): apply eip rules to current hyper and current ipv4 address
+	if currentHyper == "" {
+		return ctrl.Result{}, nil
+	}
+	log.Info(fmt.Sprintf("Apply hyper eip rules eip_%s<->vmip_%s on %s", eb.Spec.EipAddr, currentIP, currentHyper))
 
 	// Clean jobs according to job history limit
-
-	// Update last hyper and vmi ip info
 
 	return ctrl.Result{}, nil
 }
@@ -145,6 +219,16 @@ func (r *EipBindingReconciler) findObjectsForVmi(ctx context.Context, vmi client
 
 // SetupWithManager sets up the controller with the Manager.
 func (r *EipBindingReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	if err := mgr.GetFieldIndexer().IndexField(context.Background(), &virteipv1.EipBinding{}, ".spec.vmiName", func(rawObj client.Object) []string {
+		eb := rawObj.(*virteipv1.EipBinding)
+		if eb.Spec.Vmi == "" {
+			return nil
+		}
+		return []string{eb.Spec.Vmi}
+	}); err != nil {
+		return err
+	}
+
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&virteipv1.EipBinding{}).
 		Owns(&vmv1.VirtualMachineInstance{}).

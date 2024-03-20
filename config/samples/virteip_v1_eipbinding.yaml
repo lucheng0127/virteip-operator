@@ -9,4 +9,5 @@ metadata:
     app.kubernetes.io/created-by: virteip-operator
   name: eipbinding-sample
 spec:
-  # TODO(user): Add fields here
+  vmi: cirros
+  eip: 192.168.137.50
