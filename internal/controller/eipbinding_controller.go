@@ -135,10 +135,10 @@ func (r *EipBindingReconciler) constructEipBindingJob(eb virteipv1.EipBinding, c
 		},
 	}
 
-	// TODO(shawnlu): Set controller reference
-	//if err := ctrl.SetControllerReference(eb, job, r.Scheme); err != nil {
-	//	return nil, err
-	//}
+	// Set controller reference
+	if err := ctrl.SetControllerReference(&eb, job, r.Scheme); err != nil {
+		return nil, err
+	}
 
 	return job, nil
 }
@@ -181,14 +181,30 @@ func (r *EipBindingReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	// Get current eipbinding
 	var eb virteipv1.EipBinding
 
-	if err := r.Get(ctx, req.NamespacedName, &eb); err != nil {
-		if errors.IsNotFound(err) {
-			return ctrl.Result{}, nil
-		}
-
+	if err := r.Get(ctx, req.NamespacedName, &eb); client.IgnoreNotFound(err) != nil {
 		log.Error(err, "unable to fetch EipBinding")
 		return ctrl.Result{}, err
 	}
+
+	//// Clean jobs according to job history limit
+	//var childJobs kbatch.JobList
+
+	//if err := r.List(ctx, &childJobs, client.InNamespace(req.Namespace), client.MatchingFields{".metadata.controller": req.Name}); err != nil {
+	//	log.Error(err, "unable to list child jobs")
+	//	return ctrl.Result{}, err
+	//}
+
+	//for i, job := range childJobs.Items {
+	//	if int32(i) >= int32(len(childJobs.Items))-*eb.Spec.JobHistory {
+	//		break
+	//	}
+
+	//	if err := r.Delete(ctx, &job, client.PropagationPolicy(metav1.DeletePropagationBackground)); client.IgnoreNotFound(err) != nil {
+	//		log.Error(err, fmt.Sprintf("unable to delete old job %s", job.Name))
+	//	} else {
+	//		log.Info(fmt.Sprintf("delete old job %s", job.Name))
+	//	}
+	//}
 
 	// Update last hyper and vmi ip info before exist if vmi hyper or ip info changed
 	needUpdate := false
@@ -290,8 +306,6 @@ func (r *EipBindingReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		return ctrl.Result{}, err
 	}
 
-	// TODO(shawnlu): Clean jobs according to job history limit
-
 	return ctrl.Result{}, nil
 }
 
@@ -328,6 +342,21 @@ func (r *EipBindingReconciler) SetupWithManager(mgr ctrl.Manager) error {
 			return nil
 		}
 		return []string{eb.Spec.Vmi}
+	}); err != nil {
+		return err
+	}
+
+	if err := mgr.GetFieldIndexer().IndexField(context.Background(), &kbatch.Job{}, ".metadata.controller", func(rawObj client.Object) []string {
+		job := rawObj.(*kbatch.Job)
+		owner := metav1.GetControllerOf(job)
+		if owner == nil {
+			return nil
+		}
+		if owner.APIVersion != virteipv1.GroupVersion.String() {
+			return nil
+		}
+
+		return []string{owner.Name}
 	}); err != nil {
 		return err
 	}

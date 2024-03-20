@@ -45,7 +45,7 @@ type EipBindingSpec struct {
 
 	// The number of jobs to retain
 	// +optional
-	//+kubebuilder:default:=5
+	//+kubebuilder:default:=3
 	//+kubebuilder:validation:Minimum=0
 	JobHistory *int32 `json:"jobHistory,omitempty"`
 }
