@@ -22,7 +22,6 @@ import (
 	"math/rand"
 	"strings"
 
-	"golang.org/x/sync/errgroup"
 	kbatch "k8s.io/api/batch/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/fields"
@@ -45,6 +44,7 @@ const (
 	JobImg       = "quay.io/shawnlu0127/eipctl:20240319"
 	ActionBind   = "bind"
 	ActionUnbind = "unbind"
+	JoinKey      = ".metadata.controller"
 )
 
 var eipctlCmd = "/eipctl --target %s:6127 --eip-ip %s --vmi-ip %s --action %s"
@@ -93,7 +93,13 @@ func (r *EipBindingReconciler) getVmiInfo(eb virteipv1.EipBinding) (string, stri
 		return "", "", errors.NewBadRequest("vmi without interface, can't bind")
 	}
 
-	return hyperAddr, vmi.Status.Interfaces[0].IP, nil
+	vmiip := vmi.Status.Interfaces[0].IP
+	if hyperAddr == "" || vmiip == "" {
+		// Vmi info not sync finished
+		return "", "", nil
+	}
+
+	return hyperAddr, vmiip, nil
 }
 
 func randStrings(n int) string {
@@ -159,6 +165,40 @@ func (r *EipBindingReconciler) syncEipBinding(ctx context.Context, eb virteipv1.
 	return r.Create(ctx, job)
 }
 
+func (r *EipBindingReconciler) deleteStaledJobs(ctx context.Context, eb virteipv1.EipBinding) error {
+	var childJobs kbatch.JobList
+
+	if err := r.List(ctx, &childJobs, client.InNamespace(eb.Namespace), client.MatchingFields{JoinKey: eb.Name}); client.IgnoreAlreadyExists(err) != nil {
+		return err
+	}
+
+	for i, job := range childJobs.Items {
+		if int32(i) >= int32(len(childJobs.Items))-*eb.Spec.JobHistory {
+			break
+		}
+
+		// Set propagationPolicy=Background, nor when job delete, pod will not be delete
+		err := r.Delete(ctx, &job, client.PropagationPolicy(metav1.DeletePropagationBackground))
+		if err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func ignoreErrs(err error) error {
+	if err == nil {
+		return nil
+	}
+
+	if strings.Contains(err.Error(), "resource name may not be empty") {
+		return nil
+	}
+
+	return err
+}
+
 //+kubebuilder:rbac:groups=virteip.github.com,resources=eipbindings,verbs=get;list;watch;create;update;patch;delete
 //+kubebuilder:rbac:groups=virteip.github.com,resources=eipbindings/status,verbs=get;update;patch
 //+kubebuilder:rbac:groups=virteip.github.com,resources=eipbindings/finalizers,verbs=update
@@ -186,31 +226,15 @@ func (r *EipBindingReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		return ctrl.Result{}, err
 	}
 
-	//// Clean jobs according to job history limit
-	//var childJobs kbatch.JobList
-
-	//if err := r.List(ctx, &childJobs, client.InNamespace(req.Namespace), client.MatchingFields{".metadata.controller": req.Name}); err != nil {
-	//	log.Error(err, "unable to list child jobs")
-	//	return ctrl.Result{}, err
-	//}
-
-	//for i, job := range childJobs.Items {
-	//	if int32(i) >= int32(len(childJobs.Items))-*eb.Spec.JobHistory {
-	//		break
-	//	}
-
-	//	if err := r.Delete(ctx, &job, client.PropagationPolicy(metav1.DeletePropagationBackground)); client.IgnoreNotFound(err) != nil {
-	//		log.Error(err, fmt.Sprintf("unable to delete old job %s", job.Name))
-	//	} else {
-	//		log.Info(fmt.Sprintf("delete old job %s", job.Name))
-	//	}
-	//}
-
 	// Update last hyper and vmi ip info before exist if vmi hyper or ip info changed
 	needUpdate := false
 	defer func() {
 		if needUpdate {
-			if err := r.Update(ctx, &eb); err != nil {
+			if err := r.deleteStaledJobs(ctx, eb); client.IgnoreNotFound(err) != nil {
+				log.Error(err, "delete staled jobs")
+			}
+
+			if err := r.Update(ctx, &eb); ignoreErrs(err) != nil {
 				log.Error(err, "update Eipbinding")
 			}
 		}
@@ -233,7 +257,8 @@ func (r *EipBindingReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 			err := r.syncEipBinding(ctx, eb, ActionUnbind, eb.Spec.LastHyper, eb.Spec.EipAddr, eb.Spec.LastIP)
 			if err != nil {
 				log.Error(err, "clean up eip rules [1]")
-				return ctrl.Result{}, err
+				// Do not return nor will block crd delete
+				//return ctrl.Result{}, err
 			}
 		}
 
@@ -265,45 +290,32 @@ func (r *EipBindingReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	}
 
 	// Generate job to sync eipbinding rules
-	staleHyper := eb.Spec.LastHyper
-	staleIP := eb.Spec.LastIP
+	staledHyper := eb.Spec.LastHyper
+	staledIP := eb.Spec.LastIP
 	eb.Spec.LastHyper = currentHyper
 	eb.Spec.LastIP = currentIP
 	needUpdate = true
 
-	eg := new(errgroup.Group)
-	if staleHyper != "" && staleIP != "" {
+	if staledHyper != "" && staledIP != "" {
 		// up staled eip rules
-		log.Info(fmt.Sprintf("Clean up staled eip rules [2] eip_%s<->vmip_%s on %s", eb.Spec.EipAddr, staleIP, staleHyper))
-		eg.Go(func() error {
-			err := r.syncEipBinding(ctx, eb, ActionUnbind, staleHyper, eb.Spec.EipAddr, staleIP)
+		log.Info(fmt.Sprintf("Clean up staled eip rules [2] eip_%s<->vmip_%s on %s", eb.Spec.EipAddr, staledIP, staledHyper))
+		err := r.syncEipBinding(ctx, eb, ActionUnbind, staledHyper, eb.Spec.EipAddr, staledIP)
 
-			if err != nil {
-				log.Error(err, "clean up eip rules [2]")
-			}
-
-			return err
-		})
-	}
-
-	if currentHyper == "" {
-		return ctrl.Result{}, nil
+		if err != nil {
+			log.Error(err, "clean up eip rules [2]")
+			return ctrl.Result{}, err
+		}
 	}
 
 	// Apply eip rules to current hyper and current ipv4 address
-	log.Info(fmt.Sprintf("Apply hyper eip rules [1] eip_%s<->vmip_%s on %s", eb.Spec.EipAddr, currentIP, currentHyper))
-	eg.Go(func() error {
-		err := r.syncEipBinding(ctx, eb, ActionBind, currentHyper, eb.Spec.EipAddr, currentIP)
+	if currentHyper != "" && currentIP != "" {
+		log.Info(fmt.Sprintf("Apply hyper eip rules [1] eip_%s<->vmip_%s on %s", eb.Spec.EipAddr, currentIP, currentHyper))
+		err = r.syncEipBinding(ctx, eb, ActionBind, currentHyper, eb.Spec.EipAddr, currentIP)
 
 		if err != nil {
 			log.Error(err, "apply eip rules [1]")
+			return ctrl.Result{}, err
 		}
-
-		return err
-	})
-
-	if err := eg.Wait(); err != nil {
-		return ctrl.Result{}, err
 	}
 
 	return ctrl.Result{}, nil
@@ -346,7 +358,7 @@ func (r *EipBindingReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		return err
 	}
 
-	if err := mgr.GetFieldIndexer().IndexField(context.Background(), &kbatch.Job{}, ".metadata.controller", func(rawObj client.Object) []string {
+	if err := mgr.GetFieldIndexer().IndexField(context.Background(), &kbatch.Job{}, JoinKey, func(rawObj client.Object) []string {
 		job := rawObj.(*kbatch.Job)
 		owner := metav1.GetControllerOf(job)
 		if owner == nil {
