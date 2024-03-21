@@ -1,8 +1,29 @@
 # virteip-operator
-// TODO(user): Add simple overview of use/purpose
+**virteip-operator** is an extension for kubevirt, aim to provide an access to kubevirt vmi through elastic ip.
+
+User create an eipbinding CRD, and operator will create a job to call [kube-eip](https://github.com/lucheng0127/kube-eip) provide an elastic ip access to kubevirt vmi.
 
 ## Description
-// TODO(user): An in-depth paragraph about your project and overview of use
+The operator watch the EipBinding and kubevirt VMI resources, if EipBinding or kubevirt VMI info change, compare it if need change create a job to call kube-eip agent to clean up or apply a new eip binding rules to target hyper. And the eip binding rules will make kubevirt vmi accessable by elastic ip defined in EipBinding.
+
+EipBinding Example
+```
+apiVersion: virteip.github.com/v1
+kind: EipBinding
+metadata:
+  labels:
+    app.kubernetes.io/name: eipbinding
+    app.kubernetes.io/instance: eipbinding-sample
+    app.kubernetes.io/part-of: virteip-operator
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/created-by: virteip-operator
+  name: eipbinding-sample
+spec:
+  vmi: cirros
+  eip: 192.168.137.50
+```
+* vmi: instance name of kubevirt virtual machine
+* eip: elastic ipv4 address
 
 ## Getting Started
 
