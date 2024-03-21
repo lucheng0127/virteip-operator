@@ -3,6 +3,27 @@
 
 User create an eipbinding CRD, and operator will create a job to call [kube-eip](https://github.com/lucheng0127/kube-eip) provide an elastic ip access to kubevirt vmi.
 
+## How it work
+
+An EipBinding CR repersent an elastic ip bind to a kubevirt virtual machine instance ip(Implement by kube-eip).
+
+**Lifecyle of eip**
+
+1. create eipbinding crd
+2. virteip-operator watch eipbinding and vmi
+3. create a job use eipctl image
+4. job call kube-eip agent to apply eipbinding rules
+5. vmi stop, start or migare
+6. operator get the new vmi ip and hyper info
+7. create a job clean staled eipbinding rules
+8. create a job apply new eipbinding rules
+9. delete eipbinding crd
+10. create a job clean up eipbinding rules
+11. delete jobs and pods created by crd controller
+
+The crd controller will auto delete staled jobs.
+_ the default job history limit is 3, it means one crd will keep no more than 3 jobs hisotry, you can set it in crd spec.jobHistory_
+
 ## Description
 The operator watch the EipBinding and kubevirt VMI resources, if EipBinding or kubevirt VMI info change, compare it if need change create a job to call kube-eip agent to clean up or apply a new eip binding rules to target hyper. And the eip binding rules will make kubevirt vmi accessable by elastic ip defined in EipBinding.
 
