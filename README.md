@@ -28,12 +28,21 @@ spec:
 ## Getting Started
 
 ### Prerequisites
-- go version v1.21.0+
-- docker version 17.03+.
-- kubectl version v1.11.3+.
-- Access to a Kubernetes v1.11.3+ cluster.
+- nerdctl version 2.0.0-beta.2+.
+- Access to a Kubernetes cluster.
 
 ### To Deploy on the cluster
+**Current tested IMG**:
+
+* quay.io/shawnlu0127/virteip-operator:20240321
+* quay.io/shawnlu0127/eipctl:20240319 (job pod image)
+
+_The eipctl images x86 only right now, for arm64 check the readme of [kube-eip](https://github.com/lucheng0127/kube-eip) to build arm64 image_
+
+Change the image in code and rebuild the operator image
+```
+# virteip-operator/internal/controller/eipbinding_controller.go line 44
+```
 **Build and push your image to the location specified by `IMG`:**
 
 ```sh

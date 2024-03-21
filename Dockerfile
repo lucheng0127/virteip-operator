@@ -2,6 +2,7 @@
 FROM golang:1.21 AS builder
 ARG TARGETOS
 ARG TARGETARCH
+ENV GOPROXY=https://goproxy.io,direct
 
 WORKDIR /workspace
 # Copy the Go Modules manifests
@@ -25,7 +26,7 @@ RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build -a -o ma
 
 # Use distroless as minimal base image to package the manager binary
 # Refer to https://github.com/GoogleContainerTools/distroless for more details
-FROM gcr.io/distroless/static:nonroot
+FROM quay.io/shawnlu0127/distroless/static:nonroot
 WORKDIR /
 COPY --from=builder /workspace/manager .
 USER 65532:65532
