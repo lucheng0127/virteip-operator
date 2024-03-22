@@ -260,6 +260,7 @@ func (r *EipBindingReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 				// Do not return nor will block crd delete
 				//return ctrl.Result{}, err
 			}
+			// TODO(shawnlu): Wait clean job finished
 		}
 
 		controllerutil.RemoveFinalizer(&eb, finalizerName)
