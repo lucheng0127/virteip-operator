@@ -46,7 +46,7 @@ spec:
                 description: The elastic ipv4 address
                 type: string
               jobHistory:
-                default: 3
+                default: 5
                 description: The number of jobs to retain
                 format: int32
                 minimum: 0

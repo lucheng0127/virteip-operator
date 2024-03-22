@@ -200,6 +200,13 @@ func (r *EipBindingReconciler) deleteStaledJobs(ctx context.Context, eb virteipv
 			break
 		}
 
+		if job.Status.Succeeded == 0 && job.Status.Failed == 0 {
+			// When migrate vmi, will create 2 jobs, the job history is too small
+			// and will delete not finished job.
+			// If job not finished skip
+			continue
+		}
+
 		// Set propagationPolicy=Background, nor when job delete, pod will not be delete
 		err := r.Delete(ctx, &job, client.PropagationPolicy(metav1.DeletePropagationBackground))
 		if err != nil {

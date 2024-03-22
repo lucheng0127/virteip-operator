@@ -22,7 +22,7 @@ An EipBinding CR repersent an elastic ip bind to a kubevirt virtual machine inst
 11. delete jobs and pods created by crd controller
 
 The crd controller will auto delete staled jobs.
-_ the default job history limit is 3, it means one crd will keep no more than 3 jobs hisotry, you can set it in crd spec.jobHistory_
+_ the default job history limit is 3, it means one crd will keep no more than 5 jobs hisotry, you can set it in crd spec.jobHistory_
 
 ## Description
 The operator watch the EipBinding and kubevirt VMI resources, if EipBinding or kubevirt VMI info change, compare it if need change create a job to call kube-eip agent to clean up or apply a new eip binding rules to target hyper. And the eip binding rules will make kubevirt vmi accessable by elastic ip defined in EipBinding.
@@ -55,7 +55,7 @@ spec:
 ### To Deploy on the cluster
 **Current tested IMG**:
 
-* quay.io/shawnlu0127/virteip-operator:20240321
+* quay.io/shawnlu0127/virteip-operator:20240322-fixcleanup
 * quay.io/shawnlu0127/eipctl:20240319 (job pod image)
 
 _The eipctl images x86 only right now, for arm64 check the readme of [kube-eip](https://github.com/lucheng0127/kube-eip) to build arm64 image_

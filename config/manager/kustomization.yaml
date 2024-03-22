@@ -5,4 +5,4 @@ kind: Kustomization
 images:
 - name: controller
   newName: quay.io/shawnlu0127/virteip-operator
-  newTag: "20240321"
+  newTag: 20240322-fixcleanup
