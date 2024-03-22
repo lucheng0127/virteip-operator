@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"math/rand"
 	"strings"
+	"time"
 
 	kbatch "k8s.io/api/batch/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
@@ -149,7 +150,7 @@ func (r *EipBindingReconciler) constructEipBindingJob(eb virteipv1.EipBinding, c
 	return job, nil
 }
 
-func (r *EipBindingReconciler) syncEipBinding(ctx context.Context, eb virteipv1.EipBinding, action, hyper, eip, vmip string) error {
+func (r *EipBindingReconciler) syncEipBinding(ctx context.Context, eb virteipv1.EipBinding, action, hyper, eip, vmip string, wait bool) error {
 	var cmd string
 	if strings.ToLower(action) == ActionBind {
 		cmd = fmt.Sprintf(eipctlCmd, hyper, eip, vmip, ActionBind)
@@ -162,7 +163,29 @@ func (r *EipBindingReconciler) syncEipBinding(ctx context.Context, eb virteipv1.
 		return err
 	}
 
-	return r.Create(ctx, job)
+	err = r.Create(ctx, job)
+	if !wait || err != nil {
+		return err
+	}
+
+	// Waiting for job finished
+	for {
+		var rjob kbatch.Job
+		if err := r.Get(ctx, client.ObjectKeyFromObject(job), &rjob); err != nil {
+			return err
+		}
+
+		if rjob.Status.Succeeded > 0 {
+			break
+		}
+
+		if rjob.Status.Failed > 0 {
+			return fmt.Errorf("clean up job %s in namespace %s failed", &rjob.Name, &rjob.Namespace)
+		}
+
+		time.Sleep(time.Second)
+	}
+	return nil
 }
 
 func (r *EipBindingReconciler) deleteStaledJobs(ctx context.Context, eb virteipv1.EipBinding) error {
@@ -254,7 +277,7 @@ func (r *EipBindingReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		if controllerutil.ContainsFinalizer(&eb, finalizerName) {
 			// Do clean up
 			log.Info(fmt.Sprintf("Clean up staled eip rules [1] eip_%s<->vmip_%s on %s", eb.Spec.EipAddr, eb.Spec.LastIP, eb.Spec.LastHyper))
-			err := r.syncEipBinding(ctx, eb, ActionUnbind, eb.Spec.LastHyper, eb.Spec.EipAddr, eb.Spec.LastIP)
+			err := r.syncEipBinding(ctx, eb, ActionUnbind, eb.Spec.LastHyper, eb.Spec.EipAddr, eb.Spec.LastIP, true)
 			if err != nil {
 				log.Error(err, "clean up eip rules [1]")
 				// Do not return nor will block crd delete
@@ -299,7 +322,7 @@ func (r *EipBindingReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	if staledHyper != "" && staledIP != "" {
 		// up staled eip rules
 		log.Info(fmt.Sprintf("Clean up staled eip rules [2] eip_%s<->vmip_%s on %s", eb.Spec.EipAddr, staledIP, staledHyper))
-		err := r.syncEipBinding(ctx, eb, ActionUnbind, staledHyper, eb.Spec.EipAddr, staledIP)
+		err := r.syncEipBinding(ctx, eb, ActionUnbind, staledHyper, eb.Spec.EipAddr, staledIP, false)
 
 		if err != nil {
 			log.Error(err, "clean up eip rules [2]")
@@ -310,7 +333,7 @@ func (r *EipBindingReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	// Apply eip rules to current hyper and current ipv4 address
 	if currentHyper != "" && currentIP != "" {
 		log.Info(fmt.Sprintf("Apply hyper eip rules [1] eip_%s<->vmip_%s on %s", eb.Spec.EipAddr, currentIP, currentHyper))
-		err = r.syncEipBinding(ctx, eb, ActionBind, currentHyper, eb.Spec.EipAddr, currentIP)
+		err = r.syncEipBinding(ctx, eb, ActionBind, currentHyper, eb.Spec.EipAddr, currentIP, false)
 
 		if err != nil {
 			log.Error(err, "apply eip rules [1]")
