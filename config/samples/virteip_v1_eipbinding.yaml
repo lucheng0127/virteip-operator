@@ -10,4 +10,4 @@ metadata:
   name: eipbinding-sample
 spec:
   vmi: cirros
-  eip: 192.168.137.50
+  eip: 192.168.137.51
